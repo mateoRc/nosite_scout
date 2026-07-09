@@ -138,6 +138,9 @@ LOCAL_CATEGORIES = (
 
 TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+DEFAULT_OSM_RADIUS_KM = 25.0
 DETAIL_FIELDS = ",".join(
     [
         "place_id",
@@ -239,17 +242,138 @@ def score_likely_small_business(row: dict[str, Any], review_threshold: int) -> b
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Find local businesses that likely lack a real website.")
+    parser.add_argument("--manual-add", action="store_true", help="Add one lead manually, then export.")
+    parser.add_argument("--manual-name", help="Manual lead business name.")
+    parser.add_argument("--manual-phone", help="Manual lead phone number.")
+    parser.add_argument("--manual-website", help="Manual lead website URL.")
+    parser.add_argument("--manual-address", help="Manual lead address.")
+    parser.add_argument("--manual-city", help="Manual lead city.")
+    parser.add_argument("--manual-category", default="manual_review", help="Manual lead category.")
+    parser.add_argument("--manual-notes", help="Manual lead notes.")
+    parser.add_argument("--manual-status", default="review_website_age", help="Manual lead status.")
+    parser.add_argument("--provider", choices=["osm", "google"], default="osm", help="Data provider. Default: osm.")
     parser.add_argument("--location", default="Istria, Croatia")
+    parser.add_argument("--locations", nargs="+", help="One or more areas to search. Overrides --location.")
+    parser.add_argument("--countries", nargs="+", help="One or more countries to combine with each location.")
+    parser.add_argument("--radius-km", "--range-km", dest="radius_km", type=float, help="Radius bias in kilometers.")
+    parser.add_argument("--center-lat", type=float, help="Latitude used with --radius-km.")
+    parser.add_argument("--center-lng", type=float, help="Longitude used with --radius-km.")
     parser.add_argument("--keywords", nargs="+", default=DEFAULT_KEYWORDS)
     parser.add_argument("--max-results", type=int, default=50, help="Maximum Places results per keyword.")
     parser.add_argument("--review-threshold", type=int, default=300)
-    parser.add_argument("--formats", default="csv,json,xlsx", help="Comma-separated: csv,json,xlsx,xml")
+    parser.add_argument("--min-rating", type=float)
+    parser.add_argument("--max-rating", type=float)
+    parser.add_argument("--min-reviews", type=int)
+    parser.add_argument("--max-reviews", type=int)
+    parser.add_argument("--include-terms", nargs="+", help="Export only leads matching any term in name/category/address/city.")
+    parser.add_argument("--exclude-terms", nargs="+", help="Exclude exported leads matching any term in name/category/address/city.")
+    parser.add_argument(
+        "--lead-preset",
+        choices=["no_website_phone", "no_website", "mobile_no_website", "all"],
+        default="no_website_phone",
+        help="Export preset. Default: no_website_phone.",
+    )
+    parser.add_argument(
+        "--secondary-scrape",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Optional enrichment for records that do have a real website. Default: disabled.",
+    )
+    parser.add_argument(
+        "--formats",
+        "--output-format",
+        dest="formats",
+        default="csv,json,xlsx",
+        help="Comma-separated exports: csv,json,xlsx,xml,all",
+    )
     parser.add_argument("--only-no-website", action="store_true")
     parser.add_argument("--has-phone", action="store_true")
     parser.add_argument("--mobile-only", action="store_true")
     parser.add_argument("--db-path", default="nosite_scout.sqlite")
     parser.add_argument("--out-dir", default="exports")
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.manual_add and not args.manual_name:
+        raise ValueError("--manual-add requires --manual-name")
+    has_center = args.center_lat is not None and args.center_lng is not None
+    if args.radius_km is not None and not has_center and args.provider == "google":
+        raise ValueError("--radius-km requires both --center-lat and --center-lng with --provider google")
+    if args.radius_km is not None and args.radius_km <= 0:
+        raise ValueError("--radius-km must be greater than 0")
+    if args.min_rating is not None and not 0 <= args.min_rating <= 5:
+        raise ValueError("--min-rating must be between 0 and 5")
+    if args.max_rating is not None and not 0 <= args.max_rating <= 5:
+        raise ValueError("--max-rating must be between 0 and 5")
+    if args.min_rating is not None and args.max_rating is not None and args.min_rating > args.max_rating:
+        raise ValueError("--min-rating cannot be greater than --max-rating")
+    if args.min_reviews is not None and args.min_reviews < 0:
+        raise ValueError("--min-reviews must be 0 or greater")
+    if args.max_reviews is not None and args.max_reviews < 0:
+        raise ValueError("--max-reviews must be 0 or greater")
+    if args.min_reviews is not None and args.max_reviews is not None and args.min_reviews > args.max_reviews:
+        raise ValueError("--min-reviews cannot be greater than --max-reviews")
+
+
+def slugify_id(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "manual"
+
+
+def manual_lead_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    phone_preferred = normalize_phone(args.manual_phone)
+    website = args.manual_website
+    notes = args.manual_notes
+    if website and not notes:
+        notes = f"Has website, check if old/outdated: {website}"
+
+    identifier_source = website or args.manual_name
+    lead = {
+        "place_id": f"manual:{slugify_id(identifier_source)}",
+        "name": args.manual_name,
+        "category": args.manual_category,
+        "address": args.manual_address,
+        "city": args.manual_city or extract_city(args.manual_address),
+        "phone": phone_preferred,
+        "formatted_phone_number": phone_preferred,
+        "international_phone_number": phone_preferred if phone_preferred and phone_preferred.startswith("+") else None,
+        "phone_preferred": phone_preferred,
+        "mobile_phone": phone_preferred if is_likely_croatian_mobile(phone_preferred) else None,
+        "has_phone": bool(phone_preferred),
+        "website": website,
+        "google_maps_url": None,
+        "rating": None,
+        "review_count": 0,
+        "no_website": not is_real_website(website),
+        "likely_small_business": True,
+        "source": "manual",
+        "status": args.manual_status,
+        "notes": notes or "",
+        "email": None,
+        "contact_page_url": None,
+        "facebook_url": None,
+        "instagram_url": None,
+        "whatsapp_url": None,
+    }
+    return lead
+
+
+def build_search_targets(args: argparse.Namespace) -> list[str]:
+    locations = args.locations or [args.location]
+    countries = args.countries or []
+    targets: list[str] = []
+
+    for location in locations:
+        if countries:
+            for country in countries:
+                target = location if country.lower() in location.lower() else f"{location}, {country}"
+                if target not in targets:
+                    targets.append(target)
+        elif location not in targets:
+            targets.append(location)
+
+    return targets
 
 
 def google_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -263,9 +387,104 @@ def google_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def search_places(api_key: str, keyword: str, location: str, max_results: int) -> list[dict[str, Any]]:
+def request_headers() -> dict[str, str]:
+    return {"User-Agent": "NoSiteScout/0.1 (internal lead research; contact: local)"}
+
+
+def geocode_location(location: str) -> tuple[float, float]:
+    response = requests.get(
+        NOMINATIM_SEARCH_URL,
+        params={"q": location, "format": "jsonv2", "limit": 1},
+        headers=request_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload:
+        raise RuntimeError(f"Could not geocode location with OpenStreetMap/Nominatim: {location}")
+    return float(payload[0]["lat"]), float(payload[0]["lon"])
+
+
+def osm_keyword_filter(keyword: str) -> str:
+    normalized = keyword.lower().replace("_", " ")
+    mapping = {
+        "restaurants": [('amenity', 'restaurant')],
+        "restaurant": [('amenity', 'restaurant')],
+        "cafes": [('amenity', 'cafe')],
+        "cafe": [('amenity', 'cafe')],
+        "apartments": [('tourism', 'apartment'), ('tourism', 'guest_house'), ('tourism', 'hotel')],
+        "plumbers": [('craft', 'plumber')],
+        "plumber": [('craft', 'plumber')],
+        "electricians": [('craft', 'electrician')],
+        "electrician": [('craft', 'electrician')],
+        "beauty salon": [('shop', 'beauty')],
+        "beauty_salon": [('shop', 'beauty')],
+        "mechanics": [('shop', 'car_repair'), ('craft', 'mechanic')],
+        "mechanic": [('shop', 'car_repair'), ('craft', 'mechanic')],
+        "dentists": [('amenity', 'dentist')],
+        "dentist": [('amenity', 'dentist')],
+        "small shops": [('shop', None)],
+        "small_shops": [('shop', None)],
+        "local services": [('craft', None), ('office', None)],
+        "local_services": [('craft', None), ('office', None)],
+    }
+    pairs = mapping.get(normalized, [('name', keyword)])
+    filters = []
+    for key, value in pairs:
+        if value is None:
+            filters.append(f'["{key}"]')
+        elif key == "name":
+            escaped = re.escape(value)
+            filters.append(f'["name"~"{escaped}",i]')
+        else:
+            filters.append(f'["{key}"="{value}"]')
+    return "".join(filters)
+
+
+def search_osm_places(
+    keyword: str,
+    location: str,
+    max_results: int,
+    center_lat: float | None = None,
+    center_lng: float | None = None,
+    radius_km: float | None = None,
+) -> list[dict[str, Any]]:
+    lat, lng = (center_lat, center_lng) if center_lat is not None and center_lng is not None else geocode_location(location)
+    radius_m = int((radius_km or DEFAULT_OSM_RADIUS_KM) * 1000)
+    tag_filter = osm_keyword_filter(keyword)
+    query = f"""
+    [out:json][timeout:30];
+    (
+      node{tag_filter}(around:{radius_m},{lat},{lng});
+      way{tag_filter}(around:{radius_m},{lat},{lng});
+      relation{tag_filter}(around:{radius_m},{lat},{lng});
+    );
+    out center tags {max_results};
+    """
+    response = requests.post(
+        OVERPASS_URL,
+        data={"data": query},
+        headers=request_headers(),
+        timeout=45,
+    )
+    response.raise_for_status()
+    return response.json().get("elements", [])[:max_results]
+
+
+def search_places(
+    api_key: str,
+    keyword: str,
+    location: str,
+    max_results: int,
+    center_lat: float | None = None,
+    center_lng: float | None = None,
+    radius_km: float | None = None,
+) -> list[dict[str, Any]]:
     query = f"{keyword} in {location}"
     params = {"query": query, "key": api_key}
+    if center_lat is not None and center_lng is not None and radius_km is not None:
+        params["location"] = f"{center_lat},{center_lng}"
+        params["radius"] = int(radius_km * 1000)
     results: list[dict[str, Any]] = []
     page = 0
 
@@ -309,7 +528,25 @@ def absolutize_link(base_url: str, link: str | None) -> str | None:
     return link
 
 
-def scrape_website(url: str | None) -> dict[str, str | None]:
+def fetch_page(url: str) -> str | None:
+    try:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers=request_headers(),
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    content_type = response.headers.get("content-type", "").lower()
+    if content_type and "html" not in content_type and "text" not in content_type:
+        return None
+    return response.text[:500_000]
+
+
+def extract_contact_fields(text: str, base_url: str) -> dict[str, str | None]:
     found = {
         "email": None,
         "contact_page_url": None,
@@ -317,20 +554,6 @@ def scrape_website(url: str | None) -> dict[str, str | None]:
         "instagram_url": None,
         "whatsapp_url": None,
     }
-    if not is_real_website(url):
-        return found
-
-    try:
-        response = requests.get(
-            url,
-            timeout=10,
-            headers={"User-Agent": "NoSiteScout/0.1 (+internal lead research)"},
-        )
-        response.raise_for_status()
-    except requests.RequestException:
-        return found
-
-    text = response.text[:500_000]
     email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE)
     if email_match:
         found["email"] = html.unescape(email_match.group(0))
@@ -342,12 +565,153 @@ def scrape_website(url: str | None) -> dict[str, str | None]:
         "contact_page_url": r'href=["\']([^"\']*(?:kontakt|contact|contatti)[^"\']*)["\']',
     }
     for field, pattern in patterns.items():
-        found[field] = absolutize_link(url, first_match(pattern, text))
+        found[field] = absolutize_link(base_url, first_match(pattern, text))
 
     return found
 
 
-def detail_to_lead(detail: dict[str, Any], keyword: str, review_threshold: int) -> dict[str, Any]:
+def candidate_contact_urls(base_url: str, detected_url: str | None) -> list[str]:
+    candidates: list[str] = []
+    if detected_url:
+        candidates.append(detected_url)
+
+    parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    for path in ("/contact", "/kontakt", "/contatti", "/contacts", "/kontaktirajte-nas"):
+        candidates.append(f"{root}{path}")
+
+    unique: list[str] = []
+    for url in candidates:
+        if url and url not in unique:
+            unique.append(url)
+    return unique
+
+
+def merge_missing(base: dict[str, str | None], extra: dict[str, str | None]) -> dict[str, str | None]:
+    for key, value in extra.items():
+        if value and not base.get(key):
+            base[key] = value
+    return base
+
+
+def scrape_website(url: str | None, scrape_contact_pages: bool = True) -> dict[str, str | None]:
+    found = {
+        "email": None,
+        "contact_page_url": None,
+        "facebook_url": None,
+        "instagram_url": None,
+        "whatsapp_url": None,
+    }
+    if not is_real_website(url):
+        return found
+
+    homepage = fetch_page(url or "")
+    if not homepage:
+        return found
+
+    found = extract_contact_fields(homepage, url or "")
+    if not scrape_contact_pages:
+        return found
+
+    for contact_url in candidate_contact_urls(url or "", found.get("contact_page_url"))[:5]:
+        contact_page = fetch_page(contact_url)
+        if not contact_page:
+            continue
+        found["contact_page_url"] = found.get("contact_page_url") or contact_url
+        merge_missing(found, extract_contact_fields(contact_page, contact_url))
+        if found.get("email") and found.get("facebook_url") and found.get("instagram_url"):
+            break
+
+    return found
+
+
+def first_tag(tags: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = tags.get(key)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def osm_address(tags: dict[str, Any]) -> str | None:
+    parts = [
+        first_tag(tags, "addr:street"),
+        first_tag(tags, "addr:housenumber"),
+        first_tag(tags, "addr:postcode"),
+        first_tag(tags, "addr:city", "addr:town", "addr:village"),
+        first_tag(tags, "addr:country"),
+    ]
+    address = ", ".join(part for part in parts if part)
+    return address or None
+
+
+def osm_category(tags: dict[str, Any], fallback: str) -> str:
+    for key in ("amenity", "shop", "tourism", "craft", "office", "leisure"):
+        if tags.get(key):
+            return f"{key}:{tags[key]}"
+    return fallback
+
+
+def osm_to_lead(
+    element: dict[str, Any],
+    keyword: str,
+    location: str,
+    review_threshold: int,
+    secondary_scrape: bool = False,
+) -> dict[str, Any]:
+    tags = element.get("tags") or {}
+    phone_preferred = normalize_phone(first_tag(tags, "contact:phone", "phone", "mobile", "contact:mobile"))
+    website = first_tag(tags, "contact:website", "website", "url")
+    email = first_tag(tags, "contact:email", "email")
+    facebook_url = first_tag(tags, "contact:facebook", "facebook")
+    instagram_url = first_tag(tags, "contact:instagram", "instagram")
+    whatsapp_url = first_tag(tags, "contact:whatsapp", "whatsapp")
+    address = osm_address(tags) or location
+    city = first_tag(tags, "addr:city", "addr:town", "addr:village") or extract_city(address)
+    name = first_tag(tags, "name", "official_name", "brand") or f"Unnamed {keyword}"
+
+    lead = {
+        "place_id": f"osm:{element.get('type')}:{element.get('id')}",
+        "name": name,
+        "category": osm_category(tags, keyword),
+        "address": address,
+        "city": city,
+        "phone": phone_preferred,
+        "formatted_phone_number": phone_preferred,
+        "international_phone_number": phone_preferred if phone_preferred and phone_preferred.startswith("+") else None,
+        "phone_preferred": phone_preferred,
+        "mobile_phone": phone_preferred if is_likely_croatian_mobile(phone_preferred) else None,
+        "has_phone": bool(phone_preferred),
+        "website": website,
+        "google_maps_url": None,
+        "rating": None,
+        "review_count": 0,
+        "no_website": not is_real_website(website),
+        "likely_small_business": False,
+        "source": "openstreetmap",
+        "status": "new",
+        "notes": "",
+        "email": email,
+        "contact_page_url": first_tag(tags, "contact:url"),
+        "facebook_url": facebook_url,
+        "instagram_url": instagram_url,
+        "whatsapp_url": whatsapp_url,
+    }
+    lead["likely_small_business"] = score_likely_small_business(lead, review_threshold)
+    if secondary_scrape and is_real_website(website):
+        scraped = scrape_website(website)
+        for key, value in scraped.items():
+            if value and not lead.get(key):
+                lead[key] = value
+    return lead
+
+
+def detail_to_lead(
+    detail: dict[str, Any],
+    keyword: str,
+    review_threshold: int,
+    secondary_scrape: bool = False,
+) -> dict[str, Any]:
     address = detail.get("formatted_address")
     formatted_phone = normalize_phone(detail.get("formatted_phone_number"))
     international_phone = normalize_phone(detail.get("international_phone_number"))
@@ -384,7 +748,8 @@ def detail_to_lead(detail: dict[str, Any], keyword: str, review_threshold: int) 
         "whatsapp_url": None,
     }
     lead["likely_small_business"] = score_likely_small_business(lead, review_threshold)
-    lead.update(scrape_website(website))
+    if secondary_scrape and is_real_website(website):
+        lead.update(scrape_website(website))
     return lead
 
 
@@ -455,12 +820,45 @@ def upsert_lead(conn: sqlite3.Connection, lead: dict[str, Any]) -> str:
 
 def load_export_rows(conn: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
     clauses: list[str] = []
+    params: list[Any] = []
+    if args.lead_preset in {"no_website_phone", "no_website", "mobile_no_website"}:
+        clauses.append("no_website = 1")
+    if args.lead_preset == "no_website_phone":
+        clauses.append("has_phone = 1")
+    if args.lead_preset == "mobile_no_website":
+        clauses.append("mobile_phone IS NOT NULL AND mobile_phone != ''")
     if args.only_no_website:
         clauses.append("no_website = 1")
     if args.has_phone:
         clauses.append("has_phone = 1")
     if args.mobile_only:
         clauses.append("mobile_phone IS NOT NULL AND mobile_phone != ''")
+    if args.min_rating is not None:
+        clauses.append("rating >= ?")
+        params.append(args.min_rating)
+    if args.max_rating is not None:
+        clauses.append("rating <= ?")
+        params.append(args.max_rating)
+    if args.min_reviews is not None:
+        clauses.append("review_count >= ?")
+        params.append(args.min_reviews)
+    if args.max_reviews is not None:
+        clauses.append("review_count <= ?")
+        params.append(args.max_reviews)
+    if args.include_terms:
+        term_clauses = []
+        for term in args.include_terms:
+            term_clauses.append(
+                "(name LIKE ? OR category LIKE ? OR address LIKE ? OR city LIKE ?)"
+            )
+            params.extend([f"%{term}%"] * 4)
+        clauses.append(f"({' OR '.join(term_clauses)})")
+    if args.exclude_terms:
+        for term in args.exclude_terms:
+            clauses.append(
+                "NOT (name LIKE ? OR category LIKE ? OR address LIKE ? OR city LIKE ?)"
+            )
+            params.extend([f"%{term}%"] * 4)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""
@@ -469,7 +867,7 @@ def load_export_rows(conn: sqlite3.Connection, args: argparse.Namespace) -> list
         {where}
         ORDER BY no_website DESC, has_phone DESC, likely_small_business DESC, review_count DESC
     """
-    return [dict(row) for row in conn.execute(sql).fetchall()]
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
 def export_xml(rows: list[dict[str, Any]], path: Path) -> None:
@@ -514,6 +912,10 @@ def export_rows(rows: list[dict[str, Any]], formats: list[str], out_dir: str) ->
 def parse_formats(raw: str) -> list[str]:
     formats = [part.strip().lower() for part in raw.split(",") if part.strip()]
     allowed = {"csv", "json", "xlsx", "xml"}
+    if "all" in formats:
+        if len(formats) > 1:
+            raise ValueError("Use 'all' by itself, not mixed with other formats")
+        return ["csv", "json", "xlsx", "xml"]
     invalid = sorted(set(formats) - allowed)
     if invalid:
         raise ValueError(f"Unsupported export format(s): {', '.join(invalid)}")
@@ -524,9 +926,18 @@ def main() -> int:
     if load_dotenv is not None:
         load_dotenv()
     args = parse_args()
+    try:
+        validate_args(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    if not api_key:
-        print("Error: GOOGLE_MAPS_API_KEY is missing. Add it to .env or your environment.", file=sys.stderr)
+    if args.provider == "google" and not api_key:
+        print(
+            "Error: GOOGLE_MAPS_API_KEY is required only when using --provider google.",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -543,28 +954,83 @@ def main() -> int:
     total_places_found = 0
     saved_new = 0
     saved_updated = 0
+    search_targets = build_search_targets(args)
+
+    if args.manual_add:
+        result = upsert_lead(conn, manual_lead_from_args(args))
+        conn.commit()
+        saved_new = 1 if result == "new" else 0
+        saved_updated = 1 if result == "updated" else 0
+        rows = load_export_rows(conn, args)
+        export_paths = export_rows(rows, formats, args.out_dir)
+        print("\nNoSite Scout summary")
+        print("- manual lead saved: 1")
+        print(f"- new leads saved: {saved_new}")
+        print(f"- updated leads saved: {saved_updated}")
+        print(f"- exported rows count: {len(rows)}")
+        print("- export file paths:")
+        for path in export_paths:
+            print(f"  {path}")
+        return 0
 
     try:
-        for keyword in args.keywords:
-            print(f"Searching: {keyword} in {args.location}")
-            places = search_places(api_key, keyword, args.location, args.max_results)
-            total_places_found += len(places)
-            for place in places:
-                place_id = place.get("place_id")
-                if not place_id or place_id in seen_place_ids:
-                    continue
-                seen_place_ids.add(place_id)
-                time.sleep(0.15)
-                detail = fetch_place_details(api_key, place_id)
-                if not detail:
-                    continue
-                lead = detail_to_lead(detail, keyword, args.review_threshold)
-                result = upsert_lead(conn, lead)
-                if result == "new":
-                    saved_new += 1
+        for search_target in search_targets:
+            for keyword in args.keywords:
+                print(f"Searching {args.provider}: {keyword} in {search_target}")
+                if args.provider == "google":
+                    places = search_places(
+                        api_key or "",
+                        keyword,
+                        search_target,
+                        args.max_results,
+                        args.center_lat,
+                        args.center_lng,
+                        args.radius_km,
+                    )
                 else:
-                    saved_updated += 1
-            conn.commit()
+                    places = search_osm_places(
+                        keyword,
+                        search_target,
+                        args.max_results,
+                        args.center_lat,
+                        args.center_lng,
+                        args.radius_km,
+                    )
+                total_places_found += len(places)
+                for place in places:
+                    place_id = (
+                        place.get("place_id")
+                        if args.provider == "google"
+                        else f"osm:{place.get('type')}:{place.get('id')}"
+                    )
+                    if not place_id or place_id in seen_place_ids:
+                        continue
+                    seen_place_ids.add(place_id)
+                    time.sleep(0.15)
+                    if args.provider == "google":
+                        detail = fetch_place_details(api_key or "", place_id)
+                        if not detail:
+                            continue
+                        lead = detail_to_lead(
+                            detail,
+                            keyword,
+                            args.review_threshold,
+                            args.secondary_scrape,
+                        )
+                    else:
+                        lead = osm_to_lead(
+                            place,
+                            keyword,
+                            search_target,
+                            args.review_threshold,
+                            args.secondary_scrape,
+                        )
+                    result = upsert_lead(conn, lead)
+                    if result == "new":
+                        saved_new += 1
+                    else:
+                        saved_updated += 1
+                conn.commit()
     except (requests.RequestException, RuntimeError) as exc:
         conn.rollback()
         print(f"Error while calling Google Places: {exc}", file=sys.stderr)
@@ -578,6 +1044,7 @@ def main() -> int:
     mobile_count = sum(1 for row in rows if row.get("mobile_phone"))
 
     print("\nNoSite Scout summary")
+    print(f"- searched target count: {len(search_targets)}")
     print(f"- searched keywords count: {len(args.keywords)}")
     print(f"- total places found: {total_places_found}")
     print(f"- new leads saved: {saved_new}")
