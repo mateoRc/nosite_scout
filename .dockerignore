@@ -1,0 +1,8 @@
+.git
+.agents
+.venv
+__pycache__
+*.pyc
+nosite_scout.sqlite
+exports
+.env

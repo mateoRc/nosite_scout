@@ -4,14 +4,12 @@ NoSite Scout is a small internal Python CLI for finding local businesses in Goog
 
 The `no_website` and `mobile_phone` fields are heuristics. Google Places does not provide employee counts, and mobile-looking phone detection is best-effort only.
 
-## Setup
+## Setup With Docker
 
-Use Python 3.11 or newer.
+You do not need local Python or local Python packages. Install Docker Desktop, then build the image:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+docker compose build
 ```
 
 Copy `.env.example` to `.env` and add a Google Maps API key:
@@ -25,10 +23,17 @@ Enable the Places API for the key in Google Cloud Console. The script uses Place
 ## Usage
 
 ```powershell
-python nosite_scout.py --location "Istria, Croatia"
-python nosite_scout.py --location "Istria, Croatia" --keywords restaurants cafes plumbers electricians
-python nosite_scout.py --location "Istria, Croatia" --max-results 50 --formats csv,json,xlsx,xml
-python nosite_scout.py --only-no-website --has-phone
+docker compose run --rm scout --location "Istria, Croatia"
+docker compose run --rm scout --location "Istria, Croatia" --keywords restaurants cafes plumbers electricians
+docker compose run --rm scout --location "Istria, Croatia" --max-results 50 --formats csv,json,xlsx,xml
+docker compose run --rm scout --only-no-website --has-phone
+```
+
+You can also run it without Compose:
+
+```powershell
+docker build -t nosite-scout .
+docker run --rm --env-file .env -v ${PWD}:/data nosite-scout --location "Istria, Croatia"
 ```
 
 Default keywords:
@@ -54,7 +59,7 @@ Useful options:
 
 ## Output
 
-The script creates a SQLite database at `nosite_scout.sqlite` unless `--db-path` is set. Leads are upserted by `place_id`; existing non-empty `status` and `notes` values are preserved.
+The container runs with the project folder mounted at `/data`, so the script creates `nosite_scout.sqlite` in this folder unless `--db-path` is set. Leads are upserted by `place_id`; existing non-empty `status` and `notes` values are preserved.
 
 Exports are written to `exports` by default with timestamped names:
 

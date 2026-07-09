@@ -106,7 +106,6 @@ LOCAL_CITIES = (
     "croatia",
     "hrvatska",
     "pula",
-    "pol a",
     "rovinj",
     "porec",
     "poreč",

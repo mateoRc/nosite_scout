@@ -1,0 +1,9 @@
+services:
+  scout:
+    build: .
+    image: nosite-scout:latest
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - .:/data
