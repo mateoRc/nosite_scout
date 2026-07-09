@@ -140,6 +140,7 @@ TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OSM_RETRY_STATUSES = {429, 502, 503, 504}
 DEFAULT_OSM_RADIUS_KM = 25.0
 DETAIL_FIELDS = ",".join(
     [
@@ -260,6 +261,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--center-lng", type=float, help="Longitude used with --radius-km.")
     parser.add_argument("--keywords", nargs="+", default=DEFAULT_KEYWORDS)
     parser.add_argument("--max-results", type=int, default=50, help="Maximum Places results per keyword.")
+    parser.add_argument("--request-delay", type=float, default=2.0, help="Delay between provider requests in seconds.")
+    parser.add_argument("--osm-retries", type=int, default=2, help="Retries for rate-limited or timed-out OSM requests.")
     parser.add_argument("--review-threshold", type=int, default=300)
     parser.add_argument("--min-rating", type=float)
     parser.add_argument("--max-rating", type=float)
@@ -302,6 +305,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--radius-km requires both --center-lat and --center-lng with --provider google")
     if args.radius_km is not None and args.radius_km <= 0:
         raise ValueError("--radius-km must be greater than 0")
+    if args.request_delay < 0:
+        raise ValueError("--request-delay must be 0 or greater")
+    if args.osm_retries < 0:
+        raise ValueError("--osm-retries must be 0 or greater")
     if args.min_rating is not None and not 0 <= args.min_rating <= 5:
         raise ValueError("--min-rating must be between 0 and 5")
     if args.max_rating is not None and not 0 <= args.max_rating <= 5:
@@ -448,6 +455,7 @@ def search_osm_places(
     center_lat: float | None = None,
     center_lng: float | None = None,
     radius_km: float | None = None,
+    retries: int = 2,
 ) -> list[dict[str, Any]]:
     lat, lng = (center_lat, center_lng) if center_lat is not None and center_lng is not None else geocode_location(location)
     radius_m = int((radius_km or DEFAULT_OSM_RADIUS_KM) * 1000)
@@ -461,14 +469,26 @@ def search_osm_places(
     );
     out center tags {max_results};
     """
-    response = requests.post(
-        OVERPASS_URL,
-        data={"data": query},
-        headers=request_headers(),
-        timeout=45,
-    )
-    response.raise_for_status()
-    return response.json().get("elements", [])[:max_results]
+    for attempt in range(retries + 1):
+        response = requests.post(
+            OVERPASS_URL,
+            data={"data": query},
+            headers=request_headers(),
+            timeout=45,
+        )
+        if response.status_code not in OSM_RETRY_STATUSES:
+            response.raise_for_status()
+            return response.json().get("elements", [])[:max_results]
+        if attempt >= retries:
+            response.raise_for_status()
+        wait_seconds = 15 * (attempt + 1)
+        print(
+            f"OSM request got HTTP {response.status_code}; retrying in {wait_seconds}s...",
+            file=sys.stderr,
+        )
+        time.sleep(wait_seconds)
+
+    return []
 
 
 def search_places(
@@ -954,6 +974,7 @@ def main() -> int:
     total_places_found = 0
     saved_new = 0
     saved_updated = 0
+    skipped_searches = 0
     search_targets = build_search_targets(args)
 
     if args.manual_add:
@@ -977,25 +998,35 @@ def main() -> int:
         for search_target in search_targets:
             for keyword in args.keywords:
                 print(f"Searching {args.provider}: {keyword} in {search_target}")
-                if args.provider == "google":
-                    places = search_places(
-                        api_key or "",
-                        keyword,
-                        search_target,
-                        args.max_results,
-                        args.center_lat,
-                        args.center_lng,
-                        args.radius_km,
-                    )
-                else:
-                    places = search_osm_places(
-                        keyword,
-                        search_target,
-                        args.max_results,
-                        args.center_lat,
-                        args.center_lng,
-                        args.radius_km,
-                    )
+                if args.request_delay:
+                    time.sleep(args.request_delay)
+                try:
+                    if args.provider == "google":
+                        places = search_places(
+                            api_key or "",
+                            keyword,
+                            search_target,
+                            args.max_results,
+                            args.center_lat,
+                            args.center_lng,
+                            args.radius_km,
+                        )
+                    else:
+                        places = search_osm_places(
+                            keyword,
+                            search_target,
+                            args.max_results,
+                            args.center_lat,
+                            args.center_lng,
+                            args.radius_km,
+                            args.osm_retries,
+                        )
+                except (requests.RequestException, RuntimeError) as exc:
+                    if args.provider == "osm":
+                        skipped_searches += 1
+                        print(f"Warning: skipped OSM search for {keyword} in {search_target}: {exc}", file=sys.stderr)
+                        continue
+                    raise
                 total_places_found += len(places)
                 for place in places:
                     place_id = (
@@ -1033,7 +1064,7 @@ def main() -> int:
                 conn.commit()
     except (requests.RequestException, RuntimeError) as exc:
         conn.rollback()
-        print(f"Error while calling Google Places: {exc}", file=sys.stderr)
+        print(f"Error while calling {args.provider}: {exc}", file=sys.stderr)
         return 1
 
     rows = load_export_rows(conn, args)
@@ -1046,6 +1077,7 @@ def main() -> int:
     print("\nNoSite Scout summary")
     print(f"- searched target count: {len(search_targets)}")
     print(f"- searched keywords count: {len(args.keywords)}")
+    print(f"- skipped searches count: {skipped_searches}")
     print(f"- total places found: {total_places_found}")
     print(f"- new leads saved: {saved_new}")
     print(f"- updated leads saved: {saved_updated}")
