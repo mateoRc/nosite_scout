@@ -62,6 +62,11 @@ LEAD_COLUMNS = [
     "likely_small_business",
     "source",
     "status",
+    "assigned_to",
+    "next_follow_up_at",
+    "last_contacted_at",
+    "do_not_contact",
+    "estimated_value",
     "notes",
     "email",
     "contact_page_url",
@@ -292,6 +297,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-no-website", action="store_true")
     parser.add_argument("--has-phone", action="store_true")
     parser.add_argument("--mobile-only", action="store_true")
+    parser.add_argument(
+        "--include-do-not-contact",
+        action="store_true",
+        help="Include suppressed leads in exports. Default: excluded.",
+    )
     parser.add_argument("--db-path", default="nosite_scout.sqlite")
     parser.add_argument("--out-dir", default="exports")
     return parser.parse_args()
@@ -798,6 +808,11 @@ def connect_db(db_path: str) -> sqlite3.Connection:
             likely_small_business INTEGER,
             source TEXT,
             status TEXT DEFAULT 'new',
+            assigned_to TEXT,
+            next_follow_up_at TEXT,
+            last_contacted_at TEXT,
+            do_not_contact INTEGER DEFAULT 0,
+            estimated_value REAL,
             notes TEXT DEFAULT '',
             email TEXT,
             contact_page_url TEXT,
@@ -809,6 +824,18 @@ def connect_db(db_path: str) -> sqlite3.Connection:
         )
         """
     )
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
+    workflow_columns = {
+        "assigned_to": "TEXT",
+        "next_follow_up_at": "TEXT",
+        "last_contacted_at": "TEXT",
+        "do_not_contact": "INTEGER DEFAULT 0",
+        "estimated_value": "REAL",
+    }
+    for column, definition in workflow_columns.items():
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+    conn.commit()
     return conn
 
 
@@ -817,12 +844,23 @@ def upsert_lead(conn: sqlite3.Connection, lead: dict[str, Any]) -> str:
     row = {column: lead.get(column) for column in LEAD_COLUMNS}
     row["created_at"] = now
     row["updated_at"] = now
-    for key in ("has_phone", "no_website", "likely_small_business"):
+    for key in ("has_phone", "no_website", "likely_small_business", "do_not_contact"):
         row[key] = int(bool(row[key]))
 
     existing = conn.execute("SELECT place_id FROM leads WHERE place_id = ?", (row["place_id"],)).fetchone()
     placeholders = ",".join("?" for _ in LEAD_COLUMNS)
-    update_columns = [column for column in LEAD_COLUMNS if column not in {"place_id", "created_at", "status", "notes"}]
+    protected_workflow_columns = {
+        "place_id",
+        "created_at",
+        "status",
+        "assigned_to",
+        "next_follow_up_at",
+        "last_contacted_at",
+        "do_not_contact",
+        "estimated_value",
+        "notes",
+    }
+    update_columns = [column for column in LEAD_COLUMNS if column not in protected_workflow_columns]
     update_sql = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
     update_sql += ", status = COALESCE(NULLIF(leads.status, ''), excluded.status)"
     update_sql += ", notes = COALESCE(NULLIF(leads.notes, ''), excluded.notes)"
@@ -841,6 +879,8 @@ def upsert_lead(conn: sqlite3.Connection, lead: dict[str, Any]) -> str:
 def load_export_rows(conn: sqlite3.Connection, args: argparse.Namespace) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
+    if not args.include_do_not_contact:
+        clauses.append("COALESCE(do_not_contact, 0) = 0")
     if args.lead_preset in {"no_website_phone", "no_website", "mobile_no_website"}:
         clauses.append("no_website = 1")
     if args.lead_preset == "no_website_phone":

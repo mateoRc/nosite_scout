@@ -89,7 +89,10 @@ Useful fields include:
 | `no_website` | `1` when no real standalone website was detected |
 | `likely_small_business` | Basic local-category, local-address, chain, and review-count heuristic |
 | `source` | `openstreetmap`, `google_places`, or `manual` |
-| `status`, `notes` | Persistent workflow fields preserved when the same lead is refreshed |
+| `status`, `assigned_to`, `notes` | Qualification stage, owner, and persistent working notes |
+| `next_follow_up_at`, `last_contacted_at` | ISO date/time values used to manage follow-ups |
+| `do_not_contact` | Suppression flag; suppressed leads are excluded from normal exports |
+| `estimated_value` | Your estimated deal value in your chosen currency |
 | `created_at`, `updated_at` | UTC timestamps for database maintenance |
 
 `likely_small_business` is only a prioritization heuristic, not proof. In free OSM mode, ratings and review counts are unavailable and are stored as empty/zero values.
@@ -268,6 +271,50 @@ nosite_scout_YYYYMMDD_HHMMSS.xml
 
 Rows are sorted by no website, phone availability, likely-small-business flag, and descending review count.
 
+## Lead qualification workflow
+
+SQLite is the source of truth. XLSX/CSV files are review and bulk-editing surfaces: export them from SQLite, edit workflow columns, and import those changes back using the stable `place_id`. Never edit `place_id`.
+
+Supported statuses:
+
+```text
+new verified contacted replied meeting won lost invalid
+```
+
+Update one lead directly in SQLite:
+
+```powershell
+python lead_workflow.py update `
+  --place-id "osm:node:123456" `
+  --status contacted `
+  --assigned-to "Mateo" `
+  --last-contacted-at "2026-07-10" `
+  --next-follow-up-at "2026-07-17" `
+  --estimated-value 1200 `
+  --notes "Interested in a simple brochure website"
+```
+
+Mark a lead as suppressed:
+
+```powershell
+python lead_workflow.py update --place-id "osm:node:123456" --do-not-contact yes
+```
+
+Normal lead exports automatically exclude suppressed records. Use `--include-do-not-contact` only for administrative review.
+
+For bulk review, generate XLSX, edit only these workflow columns, save the file, and dry-run the import first:
+
+```text
+status assigned_to next_follow_up_at last_contacted_at do_not_contact estimated_value notes
+```
+
+```powershell
+python lead_workflow.py import exports/nosite_scout_YYYYMMDD_HHMMSS.xlsx --dry-run
+python lead_workflow.py import exports/nosite_scout_YYYYMMDD_HHMMSS.xlsx
+```
+
+Imports match only on `place_id`; unknown IDs are reported and never inserted. Blank workflow cells leave existing database values unchanged. Dates should use ISO format such as `2026-07-10` or `2026-07-10T14:30:00+02:00`. Subsequent discovery runs refresh business data while preserving all workflow fields.
+
 ## SQLite dashboard
 
 Generate a self-contained HTML dashboard directly from the accumulated SQLite data:
@@ -309,6 +356,7 @@ Run the report again after a search or qualification update to refresh it.
 | `--only-no-website` | Add a no-real-website export filter |
 | `--has-phone` | Add a phone-required export filter |
 | `--mobile-only` | Add a Croatian-looking-mobile export filter |
+| `--include-do-not-contact` | Include suppressed leads; excluded by default |
 | `--secondary-scrape`, `--no-secondary-scrape` | Enable/disable website contact enrichment; default off |
 | `--formats LIST`, `--output-format LIST` | `csv,json,xlsx,xml` or `all`; default `csv,json,xlsx` |
 | `--db-path PATH` | SQLite file; default `nosite_scout.sqlite` |
