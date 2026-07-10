@@ -1,0 +1,8 @@
+# Generated SQLite databases and sidecar files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+# Generated HTML dashboards
+reports/*.html
