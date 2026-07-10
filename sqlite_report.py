@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,8 @@ def prospect_category_table(conn: sqlite3.Connection) -> str:
     ).fetchall()
     body = "".join(
         "<tr>"
-        f"<td>{html.escape(str(category))}</td><td><strong>{float(probability):.1f}%</strong></td>"
+        f'<td><button class="category-link" data-category="{html.escape(str(category), quote=True)}">{html.escape(str(category))}</button></td>'
+        f"<td><strong>{float(probability):.1f}%</strong></td>"
         f"<td><span class=\"tier tier-{html.escape(str(tier))}\">{html.escape(str(tier).replace('_', ' '))}</span></td>"
         f"<td>{int(total)}</td><td>{int(qualified or 0)}</td><td>{int(contacted or 0)}</td>"
         f"<td>{int(won or 0)}</td><td>{int(lost or 0)}</td></tr>"
@@ -99,6 +101,17 @@ def main() -> int:
         statuses = grouped(conn, "status", args.top)
         sources = grouped(conn, "source", args.top)
         prospect_table = prospect_category_table(conn)
+        report_leads = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT place_id, name, category, city, phone_preferred, website,
+                          prospect_probability, prospect_tier, no_website, has_phone,
+                          status, assigned_to, next_follow_up_at, last_contacted_at,
+                          do_not_contact, estimated_value, notes
+                   FROM leads
+                   ORDER BY prospect_probability DESC, no_website DESC, has_phone DESC, name"""
+            ).fetchall()
+        ]
     finally:
         conn.close()
 
@@ -117,6 +130,39 @@ def main() -> int:
         for label, value, rate in cards
     )
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lead_json = json.dumps(report_leads, ensure_ascii=False).replace("<", "\\u003c")
+    interactive_script = r"""
+<script>
+const leads = JSON.parse(document.getElementById('lead-data').textContent);
+let selectedCategory = '', page = 1, pageSize = 15;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function renderLeads() {
+  const filtered = leads.filter(lead => (lead.category || 'Unknown') === selectedCategory);
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  page = Math.min(page, pages);
+  const shown = filtered.slice((page - 1) * pageSize, page * pageSize);
+  document.getElementById('lead-title').textContent = `${selectedCategory} — ${filtered.length} leads`;
+  document.getElementById('lead-rows').innerHTML = shown.map(lead => `<tr>
+    <td><strong>${esc(lead.name || 'Unnamed')}</strong></td><td>${esc(lead.city)}</td>
+    <td>${esc(lead.phone_preferred)}</td><td>${lead.no_website ? 'Yes' : 'No'}</td>
+    <td>${Number(lead.prospect_probability || 0).toFixed(1)}%</td><td>${esc(lead.prospect_tier)}</td>
+    <td>${esc(lead.status)}</td><td>${esc(lead.assigned_to)}</td><td>${esc(lead.last_contacted_at)}</td>
+    <td>${esc(lead.next_follow_up_at)}</td><td>${esc(lead.notes)}</td>
+  </tr>`).join('');
+  document.getElementById('page-info').textContent = `Page ${page} of ${pages}`;
+  document.getElementById('prev-page').disabled = page <= 1;
+  document.getElementById('next-page').disabled = page >= pages;
+  document.getElementById('lead-list').hidden = false;
+}
+document.querySelectorAll('.category-link').forEach(button => button.addEventListener('click', () => {
+  selectedCategory = button.dataset.category; page = 1; renderLeads();
+  document.getElementById('lead-list').scrollIntoView({behavior:'smooth', block:'start'});
+}));
+document.getElementById('page-size').addEventListener('change', event => { pageSize = Number(event.target.value); page = 1; renderLeads(); });
+document.getElementById('prev-page').addEventListener('click', () => { page--; renderLeads(); });
+document.getElementById('next-page').addEventListener('click', () => { page++; renderLeads(); });
+</script>
+"""
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NoSite Scout dashboard</title>
@@ -135,6 +181,10 @@ main{{max-width:1180px;margin:auto;padding:32px 20px}} h1{{margin:0 0 6px;font-s
 table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}}
 th:first-child,td:first-child{{text-align:left}} th{{color:#475569;font-size:13px}} .tier{{padding:4px 8px;border-radius:999px;font-size:12px;text-transform:capitalize}}
 .tier-high{{background:#dcfce7;color:#166534}} .tier-medium{{background:#dbeafe;color:#1e40af}} .tier-low{{background:#fef3c7;color:#92400e}} .tier-last_priority{{background:#fee2e2;color:#991b1b}}
+.category-link{{border:0;background:none;padding:0;color:#2563eb;font:inherit;font-weight:650;cursor:pointer;text-decoration:underline;text-underline-offset:3px}}
+.lead-list{{margin-top:20px;scroll-margin-top:16px}} .list-tools,.pagination{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0}}
+button{{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}} button:disabled{{opacity:.45;cursor:not-allowed}}
+select{{border:1px solid #cbd5e1;border-radius:7px;padding:7px;font:inherit;background:#fff}}
 @media(max-width:720px){{.grid{{grid-template-columns:1fr}}.bar-row{{grid-template-columns:100px 1fr 35px}}}}
 </style></head><body><main>
 <h1>NoSite Scout lead dashboard</h1><p class="meta">Database: {html.escape(str(db_path))} · Generated {generated}</p>
@@ -146,8 +196,14 @@ th:first-child,td:first-child{{text-align:left}} th{{color:#475569;font-size:13p
 {bar_chart("Data sources", sources, "#ea580c")}
 </div>
 {prospect_table}
+<section id="lead-list" class="panel lead-list" hidden>
+  <h2 id="lead-title">Select a category above</h2>
+  <div class="list-tools"><label>Rows per page <select id="page-size"><option>10</option><option selected>15</option><option>20</option></select></label></div>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>City</th><th>Phone</th><th>No website</th><th>Probability</th><th>Priority</th><th>Status</th><th>Assigned</th><th>Contacted</th><th>Follow-up</th><th>Notes</th></tr></thead><tbody id="lead-rows"></tbody></table></div>
+  <div class="pagination"><button id="prev-page">Previous</button><span id="page-info"></span><button id="next-page">Next</button></div>
+</section>
 <p class="note"><strong>Interpretation:</strong> “No website” is based on provider data and profile-domain rules; it still needs manual verification. Prospect probability is an editable category-based estimate, not a factual conversion rate. Phone and mobile rates measure stored data completeness, not consent to contact.</p>
-</main></body></html>"""
+</main><script id="lead-data" type="application/json">{lead_json}</script>{interactive_script}</body></html>"""
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

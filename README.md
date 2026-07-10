@@ -384,7 +384,7 @@ Generate a self-contained HTML dashboard directly from the accumulated SQLite da
 python sqlite_report.py
 ```
 
-Open `reports/lead_dashboard.html` in a browser. It shows the total lead funnel, top categories, top cities, qualification statuses, data sources, and a best-to-worst category prospect table. No additional Python packages or internet connection are required.
+Open `reports/lead_dashboard.html` in a browser. It shows the total lead funnel, top categories, top cities, qualification statuses, data sources, and a best-to-worst category prospect table. Click a category to open its read-only lead list, with 10, 15, or 20 rows per page. No additional Python packages or internet connection are required.
 
 For a campaign-specific database or output file:
 
