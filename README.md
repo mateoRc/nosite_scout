@@ -181,10 +181,14 @@ docker compose run --rm scout `
 Default keywords:
 
 ```text
-restaurants cafes apartments plumbers electricians beauty_salon mechanics dentists small_shops local_services
+restaurants cafes apartments plumbers electricians beauty_salon massage wellness_spa physiotherapy mechanics dentists private_clinics small_shops local_services
 ```
 
 In Google mode, keywords are normal text-search queries. In OSM mode, common keywords map to OSM tags. Custom OSM keywords use a broader name/category tag match and may be less complete. Prefer focused category terms and inspect the resulting `category` field.
+
+`apartments` includes OSM apartments, holiday chalets/homes, guest houses, and hotels. Use `holiday_homes` or `vacation_rentals` for a narrower holiday-accommodation search. `beauty_salon` includes beauty salons and hairdressers. `private_clinics` includes clinics and doctors' offices; dentists remain available separately through `dentists`.
+
+Additional focused service keywords include `massage`, `wellness_spa`, `physiotherapy`, `fitness_centres`, `veterinarians`, and `photographers`. Massage, wellness/spa, and physiotherapy are included in the default search; the others can be requested explicitly with `--keywords`.
 
 `--max-results` applies per keyword and search target. The same business found under multiple keywords is processed once per run and deduplicated permanently by `place_id` in SQLite.
 

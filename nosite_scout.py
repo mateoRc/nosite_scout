@@ -36,8 +36,12 @@ DEFAULT_KEYWORDS = [
     "plumbers",
     "electricians",
     "beauty_salon",
+    "massage",
+    "wellness_spa",
+    "physiotherapy",
     "mechanics",
     "dentists",
+    "private_clinics",
     "small_shops",
     "local_services",
 ]
@@ -134,8 +138,16 @@ LOCAL_CATEGORIES = (
     "plumber",
     "electrician",
     "beauty",
+    "massage",
+    "spa",
+    "physiotherapist",
+    "fitness_centre",
     "mechanic",
     "dentist",
+    "clinic",
+    "doctors",
+    "veterinary",
+    "photographer",
     "store",
     "shop",
     "local_service",
@@ -422,31 +434,57 @@ def geocode_location(location: str) -> tuple[float, float]:
     return float(payload[0]["lat"]), float(payload[0]["lon"])
 
 
-def osm_keyword_filter(keyword: str) -> str:
+def osm_keyword_filters(keyword: str) -> list[str]:
     normalized = keyword.lower().replace("_", " ")
     mapping = {
         "restaurants": [('amenity', 'restaurant')],
         "restaurant": [('amenity', 'restaurant')],
         "cafes": [('amenity', 'cafe')],
         "cafe": [('amenity', 'cafe')],
-        "apartments": [('tourism', 'apartment'), ('tourism', 'guest_house'), ('tourism', 'hotel')],
+        "apartments": [
+            ('tourism', 'apartment'),
+            ('tourism', 'chalet'),
+            ('tourism', 'guest_house'),
+            ('tourism', 'hotel'),
+        ],
+        "holiday homes": [('tourism', 'apartment'), ('tourism', 'chalet'), ('tourism', 'guest_house')],
+        "holiday_homes": [('tourism', 'apartment'), ('tourism', 'chalet'), ('tourism', 'guest_house')],
+        "vacation rentals": [('tourism', 'apartment'), ('tourism', 'chalet'), ('tourism', 'guest_house')],
+        "vacation_rentals": [('tourism', 'apartment'), ('tourism', 'chalet'), ('tourism', 'guest_house')],
         "plumbers": [('craft', 'plumber')],
         "plumber": [('craft', 'plumber')],
         "electricians": [('craft', 'electrician')],
         "electrician": [('craft', 'electrician')],
-        "beauty salon": [('shop', 'beauty')],
-        "beauty_salon": [('shop', 'beauty')],
+        "beauty salon": [('shop', 'beauty'), ('shop', 'hairdresser')],
+        "beauty_salon": [('shop', 'beauty'), ('shop', 'hairdresser')],
+        "massage": [('shop', 'massage')],
+        "massages": [('shop', 'massage')],
+        "wellness spa": [('leisure', 'spa')],
+        "wellness_spa": [('leisure', 'spa')],
+        "spa": [('leisure', 'spa')],
+        "physiotherapy": [('healthcare', 'physiotherapist')],
+        "physiotherapists": [('healthcare', 'physiotherapist')],
+        "fitness centres": [('leisure', 'fitness_centre')],
+        "fitness_centres": [('leisure', 'fitness_centre')],
+        "gyms": [('leisure', 'fitness_centre')],
         "mechanics": [('shop', 'car_repair'), ('craft', 'mechanic')],
         "mechanic": [('shop', 'car_repair'), ('craft', 'mechanic')],
         "dentists": [('amenity', 'dentist')],
         "dentist": [('amenity', 'dentist')],
+        "private clinics": [('amenity', 'clinic'), ('amenity', 'doctors')],
+        "private_clinics": [('amenity', 'clinic'), ('amenity', 'doctors')],
+        "clinics": [('amenity', 'clinic'), ('amenity', 'doctors')],
+        "veterinarians": [('amenity', 'veterinary')],
+        "vets": [('amenity', 'veterinary')],
+        "photographers": [('craft', 'photographer')],
+        "photography": [('craft', 'photographer')],
         "small shops": [('shop', None)],
         "small_shops": [('shop', None)],
         "local services": [('craft', None), ('office', None)],
         "local_services": [('craft', None), ('office', None)],
     }
     pairs = mapping.get(normalized, [('name', keyword)])
-    filters = []
+    filters: list[str] = []
     for key, value in pairs:
         if value is None:
             filters.append(f'["{key}"]')
@@ -455,7 +493,7 @@ def osm_keyword_filter(keyword: str) -> str:
             filters.append(f'["name"~"{escaped}",i]')
         else:
             filters.append(f'["{key}"="{value}"]')
-    return "".join(filters)
+    return filters
 
 
 def search_osm_places(
@@ -469,13 +507,16 @@ def search_osm_places(
 ) -> list[dict[str, Any]]:
     lat, lng = (center_lat, center_lng) if center_lat is not None and center_lng is not None else geocode_location(location)
     radius_m = int((radius_km or DEFAULT_OSM_RADIUS_KM) * 1000)
-    tag_filter = osm_keyword_filter(keyword)
+    tag_filters = osm_keyword_filters(keyword)
+    selectors = "\n".join(
+        f"      {element_type}{tag_filter}(around:{radius_m},{lat},{lng});"
+        for tag_filter in tag_filters
+        for element_type in ("node", "way", "relation")
+    )
     query = f"""
     [out:json][timeout:30];
     (
-      node{tag_filter}(around:{radius_m},{lat},{lng});
-      way{tag_filter}(around:{radius_m},{lat},{lng});
-      relation{tag_filter}(around:{radius_m},{lat},{lng});
+{selectors}
     );
     out center tags {max_results};
     """
