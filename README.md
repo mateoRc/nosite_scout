@@ -123,6 +123,7 @@ Useful fields include:
 | `mobile_phone` | Number that looks like a Croatian mobile number |
 | `no_website` | `1` when no real standalone website was detected |
 | `likely_small_business` | Basic local-category, local-address, chain, and review-count heuristic |
+| `prospect_probability`, `prospect_tier` | Editable category-only estimate used to prioritize outreach |
 | `source` | `openstreetmap`, `google_places`, or `manual` |
 | `status`, `assigned_to`, `notes` | Qualification stage, owner, and persistent working notes |
 | `next_follow_up_at`, `last_contacted_at` | ISO date/time values used to manage follow-ups |
@@ -354,6 +355,27 @@ python lead_workflow.py import exports/nosite_scout_YYYYMMDD_HHMMSS.xlsx
 
 Imports match only on `place_id`; unknown IDs are reported and never inserted. Blank workflow cells leave existing database values unchanged. Dates should use ISO format such as `2026-07-10` or `2026-07-10T14:30:00+02:00`. Subsequent discovery runs refresh business data while preserving all workflow fields.
 
+### Category prospect probabilities
+
+Every lead receives an initial `prospect_probability` from 0–100 and a `prospect_tier` using only its category. These are conservative prioritization hypotheses, not measured conversion rates. Accommodation and private healthcare start higher, while cafés start last at 0.5%.
+
+List the current rules:
+
+```powershell
+python lead_workflow.py list-category-scores
+```
+
+Change an exact category and immediately rescore all matching stored leads:
+
+```powershell
+python lead_workflow.py category-score `
+  --pattern "tourism:apartment" `
+  --probability 85 `
+  --rationale "Direct-booking pitch performed well in our calls"
+```
+
+Patterns use SQLite `LIKE`, so `craft:%` changes every craft category. Record real outcomes with the existing `won` and `lost` statuses. The HTML report shows predictions alongside contacted/won/lost counts, allowing the category assumptions to be revised after enough calls.
+
 ## SQLite dashboard
 
 Generate a self-contained HTML dashboard directly from the accumulated SQLite data:
@@ -362,7 +384,7 @@ Generate a self-contained HTML dashboard directly from the accumulated SQLite da
 python sqlite_report.py
 ```
 
-Open `reports/lead_dashboard.html` in a browser. It shows the total lead funnel, top categories, top cities, qualification statuses, and data sources. No additional Python packages or internet connection are required.
+Open `reports/lead_dashboard.html` in a browser. It shows the total lead funnel, top categories, top cities, qualification statuses, data sources, and a best-to-worst category prospect table. No additional Python packages or internet connection are required.
 
 For a campaign-specific database or output file:
 

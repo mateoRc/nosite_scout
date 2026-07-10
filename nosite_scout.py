@@ -19,6 +19,7 @@ from xml.etree import ElementTree as ET
 import requests
 
 from accommodation_search import get_campaign
+from prospect_scoring import category_score, initialize_scoring, rescore_leads
 
 try:
     import pandas as pd
@@ -66,6 +67,8 @@ LEAD_COLUMNS = [
     "review_count",
     "no_website",
     "likely_small_business",
+    "prospect_probability",
+    "prospect_tier",
     "source",
     "status",
     "assigned_to",
@@ -867,6 +870,8 @@ def connect_db(db_path: str) -> sqlite3.Connection:
             review_count INTEGER,
             no_website INTEGER,
             likely_small_business INTEGER,
+            prospect_probability REAL,
+            prospect_tier TEXT,
             source TEXT,
             status TEXT DEFAULT 'new',
             assigned_to TEXT,
@@ -893,9 +898,18 @@ def connect_db(db_path: str) -> sqlite3.Connection:
         "do_not_contact": "INTEGER DEFAULT 0",
         "estimated_value": "REAL",
     }
+    scoring_columns = {
+        "prospect_probability": "REAL",
+        "prospect_tier": "TEXT",
+    }
     for column, definition in workflow_columns.items():
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+    for column, definition in scoring_columns.items():
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+    initialize_scoring(conn)
+    rescore_leads(conn)
     conn.commit()
     return conn
 
@@ -903,6 +917,7 @@ def connect_db(db_path: str) -> sqlite3.Connection:
 def upsert_lead(conn: sqlite3.Connection, lead: dict[str, Any]) -> str:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row = {column: lead.get(column) for column in LEAD_COLUMNS}
+    row["prospect_probability"], row["prospect_tier"] = category_score(conn, row.get("category"))
     row["created_at"] = now
     row["updated_at"] = now
     for key in ("has_phone", "no_website", "likely_small_business", "do_not_contact"):
@@ -986,7 +1001,8 @@ def load_export_rows(conn: sqlite3.Connection, args: argparse.Namespace) -> list
         SELECT {",".join(LEAD_COLUMNS)}
         FROM leads
         {where}
-        ORDER BY no_website DESC, has_phone DESC, likely_small_business DESC, review_count DESC
+        ORDER BY prospect_probability DESC, no_website DESC, has_phone DESC,
+                 likely_small_business DESC, review_count DESC
     """
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 

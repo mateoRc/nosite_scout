@@ -9,9 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+try:
+    import pandas as pd
+except ModuleNotFoundError:
+    pd = None
 
 from nosite_scout import connect_db
+from prospect_scoring import set_category_score
 
 
 STATUSES = ("new", "verified", "contacted", "replied", "meeting", "won", "lost", "invalid")
@@ -44,11 +48,18 @@ def parse_args() -> argparse.Namespace:
     importer = subparsers.add_parser("import", help="Import workflow columns from CSV or XLSX.")
     importer.add_argument("path")
     importer.add_argument("--dry-run", action="store_true")
+
+    score = subparsers.add_parser("category-score", help="Set prospect probability for a category pattern.")
+    score.add_argument("--pattern", required=True, help="SQLite LIKE pattern, e.g. tourism:apartment or craft:%")
+    score.add_argument("--probability", required=True, type=float, help="Estimated acceptance probability, 0-100.")
+    score.add_argument("--rationale", default="")
+
+    subparsers.add_parser("list-category-scores", help="List configurable category probabilities.")
     return parser.parse_args()
 
 
 def clean(value: Any) -> Any:
-    if pd.isna(value):
+    if pd is not None and pd.isna(value):
         return None
     if isinstance(value, str):
         value = value.strip()
@@ -115,6 +126,8 @@ def update_lead(conn: sqlite3.Connection, place_id: str, changes: dict[str, Any]
 
 
 def import_file(conn: sqlite3.Connection, path: Path, dry_run: bool) -> tuple[int, int, int]:
+    if pd is None:
+        raise ValueError("pandas is required for CSV/XLSX imports; run: pip install -r requirements.txt")
     if path.suffix.lower() == ".csv":
         frame = pd.read_csv(path)
     elif path.suffix.lower() == ".xlsx":
@@ -177,10 +190,25 @@ def main() -> int:
                 raise ValueError(f"Unknown place_id: {args.place_id}")
             conn.commit()
             print(f"Updated {args.place_id}: {', '.join(changes)}")
-        else:
+        elif args.command == "import":
             updated, missing, skipped = import_file(conn, Path(args.path), args.dry_run)
             mode = "Dry run" if args.dry_run else "Import"
             print(f"{mode}: {updated} updated, {missing} unknown place_id, {skipped} skipped")
+        elif args.command == "category-score":
+            rescored = set_category_score(conn, args.pattern, args.probability, args.rationale)
+            conn.commit()
+            print(
+                f"Set {args.pattern} to {args.probability:.1f}% and rescored "
+                f"{rescored} matching leads"
+            )
+        else:
+            rows = conn.execute(
+                """SELECT category_pattern, probability, rationale
+                   FROM category_prospect_scores
+                   ORDER BY probability DESC, category_pattern"""
+            ).fetchall()
+            for pattern, probability, rationale in rows:
+                print(f"{probability:5.1f}%  {pattern:24}  {rationale}")
     except ValueError as exc:
         conn.rollback()
         raise SystemExit(f"Error: {exc}") from exc

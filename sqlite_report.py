@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from nosite_scout import connect_db
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a NoSite Scout SQLite dashboard.")
@@ -44,6 +46,36 @@ def bar_chart(title: str, rows: list[tuple[str, int]], color: str = "#2563eb") -
     return f'<section class="panel"><h2>{html.escape(title)}</h2>{"".join(bars)}</section>'
 
 
+def prospect_category_table(conn: sqlite3.Connection) -> str:
+    rows = conn.execute(
+        """SELECT COALESCE(NULLIF(category, ''), 'Unknown') AS category,
+                  ROUND(AVG(COALESCE(prospect_probability, 40)), 1) AS probability,
+                  COALESCE(MAX(prospect_tier), 'low') AS tier,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN no_website = 1 AND has_phone = 1 THEN 1 ELSE 0 END) AS qualified,
+                  SUM(CASE WHEN status IN ('contacted','replied','meeting','won','lost') THEN 1 ELSE 0 END) AS contacted,
+                  SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) AS won,
+                  SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) AS lost
+           FROM leads GROUP BY category
+           ORDER BY probability DESC, qualified DESC, total DESC, category"""
+    ).fetchall()
+    body = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(category))}</td><td><strong>{float(probability):.1f}%</strong></td>"
+        f"<td><span class=\"tier tier-{html.escape(str(tier))}\">{html.escape(str(tier).replace('_', ' '))}</span></td>"
+        f"<td>{int(total)}</td><td>{int(qualified or 0)}</td><td>{int(contacted or 0)}</td>"
+        f"<td>{int(won or 0)}</td><td>{int(lost or 0)}</td></tr>"
+        for category, probability, tier, total, qualified, contacted, won, lost in rows
+    )
+    return (
+        '<section class="panel prospect-table"><h2>Prospect categories: best to worst</h2>'
+        '<p class="section-note">Probability currently uses category only. Won/lost outcomes let you test and revise these estimates later.</p>'
+        '<div class="table-wrap"><table><thead><tr><th>Category</th><th>Probability</th><th>Priority</th>'
+        '<th>All</th><th>Qualified</th><th>Contacted</th><th>Won</th><th>Lost</th>'
+        f'</tr></thead><tbody>{body}</tbody></table></div></section>'
+    )
+
+
 def main() -> int:
     args = parse_args()
     if args.top < 1:
@@ -52,7 +84,7 @@ def main() -> int:
     if not db_path.exists():
         raise SystemExit(f"Database not found: {db_path}")
 
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(str(db_path))
     try:
         total = scalar(conn, "SELECT COUNT(*) FROM leads")
         no_website = scalar(conn, "SELECT COUNT(*) FROM leads WHERE no_website = 1")
@@ -66,6 +98,7 @@ def main() -> int:
         cities = grouped(conn, "city", args.top)
         statuses = grouped(conn, "status", args.top)
         sources = grouped(conn, "source", args.top)
+        prospect_table = prospect_category_table(conn)
     finally:
         conn.close()
 
@@ -98,6 +131,10 @@ main{{max-width:1180px;margin:auto;padding:32px 20px}} h1{{margin:0 0 6px;font-s
 .bar-row{{display:grid;grid-template-columns:minmax(90px,150px) 1fr 38px;align-items:center;gap:10px;margin:10px 0}}
 .bar-label{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#334155}} .bar-track{{height:18px;background:#eef2f7;border-radius:5px;overflow:hidden}}
 .bar{{height:100%;border-radius:5px}} .note{{margin-top:20px;padding:16px 18px;background:#fffbeb;border:1px solid #fde68a;border-radius:12px;color:#78350f}}
+.prospect-table{{margin-top:20px}} .section-note{{color:var(--muted);margin:-8px 0 16px}} .table-wrap{{overflow-x:auto}}
+table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}}
+th:first-child,td:first-child{{text-align:left}} th{{color:#475569;font-size:13px}} .tier{{padding:4px 8px;border-radius:999px;font-size:12px;text-transform:capitalize}}
+.tier-high{{background:#dcfce7;color:#166534}} .tier-medium{{background:#dbeafe;color:#1e40af}} .tier-low{{background:#fef3c7;color:#92400e}} .tier-last_priority{{background:#fee2e2;color:#991b1b}}
 @media(max-width:720px){{.grid{{grid-template-columns:1fr}}.bar-row{{grid-template-columns:100px 1fr 35px}}}}
 </style></head><body><main>
 <h1>NoSite Scout lead dashboard</h1><p class="meta">Database: {html.escape(str(db_path))} · Generated {generated}</p>
@@ -108,7 +145,8 @@ main{{max-width:1180px;margin:auto;padding:32px 20px}} h1{{margin:0 0 6px;font-s
 {bar_chart("Qualification status", statuses, "#059669")}
 {bar_chart("Data sources", sources, "#ea580c")}
 </div>
-<p class="note"><strong>Interpretation:</strong> “No website” is based on provider data and profile-domain rules; it still needs manual verification. Phone and mobile rates measure stored data completeness, not consent to contact.</p>
+{prospect_table}
+<p class="note"><strong>Interpretation:</strong> “No website” is based on provider data and profile-domain rules; it still needs manual verification. Prospect probability is an editable category-based estimate, not a factual conversion rate. Phone and mobile rates measure stored data completeness, not consent to contact.</p>
 </main></body></html>"""
 
     output = Path(args.output)
