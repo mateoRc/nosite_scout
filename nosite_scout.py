@@ -18,6 +18,8 @@ from xml.etree import ElementTree as ET
 
 import requests
 
+from accommodation_search import get_campaign
+
 try:
     import pandas as pd
 except ModuleNotFoundError:  # Dependencies are declared in requirements.txt.
@@ -270,13 +272,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manual-notes", help="Manual lead notes.")
     parser.add_argument("--manual-status", default="review_website_age", help="Manual lead status.")
     parser.add_argument("--provider", choices=["osm", "google"], default="osm", help="Data provider. Default: osm.")
+    parser.add_argument(
+        "--campaign",
+        choices=["accommodation"],
+        help="Apply focused search defaults; explicit locations, keywords, and radius override them.",
+    )
     parser.add_argument("--location", default="Istria, Croatia")
     parser.add_argument("--locations", nargs="+", help="One or more areas to search. Overrides --location.")
     parser.add_argument("--countries", nargs="+", help="One or more countries to combine with each location.")
     parser.add_argument("--radius-km", "--range-km", dest="radius_km", type=float, help="Radius bias in kilometers.")
     parser.add_argument("--center-lat", type=float, help="Latitude used with --radius-km.")
     parser.add_argument("--center-lng", type=float, help="Longitude used with --radius-km.")
-    parser.add_argument("--keywords", nargs="+", default=DEFAULT_KEYWORDS)
+    parser.add_argument("--keywords", nargs="+", help="Categories/search queries. Overrides campaign keywords.")
     parser.add_argument("--max-results", type=int, default=50, help="Maximum Places results per keyword.")
     parser.add_argument("--request-delay", type=float, default=2.0, help="Delay between provider requests in seconds.")
     parser.add_argument("--osm-retries", type=int, default=2, help="Retries for rate-limited or timed-out OSM requests.")
@@ -317,6 +324,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", default="nosite_scout.sqlite")
     parser.add_argument("--out-dir", default="exports")
     return parser.parse_args()
+
+
+def apply_campaign_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    """Resolve campaign or ordinary defaults after CLI parsing."""
+    if args.campaign:
+        campaign = get_campaign(args.campaign, args.provider)
+        if args.keywords is None:
+            args.keywords = list(campaign.keywords)
+        if args.radius_km is None and campaign.radius_km is not None:
+            args.radius_km = campaign.radius_km
+    elif args.keywords is None:
+        args.keywords = list(DEFAULT_KEYWORDS)
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -1026,7 +1046,7 @@ def parse_formats(raw: str) -> list[str]:
 def main() -> int:
     if load_dotenv is not None:
         load_dotenv()
-    args = parse_args()
+    args = apply_campaign_defaults(parse_args())
     try:
         validate_args(args)
     except ValueError as exc:

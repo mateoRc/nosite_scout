@@ -10,6 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY nosite_scout.py .
+COPY accommodation_search.py .
 
 WORKDIR /data
 ENTRYPOINT ["python", "/app/nosite_scout.py"]

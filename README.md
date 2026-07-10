@@ -42,6 +42,41 @@ No `.env` file is required for OSM mode.
 
 ## Recommended lead-generation workflow
 
+### Focused accommodation campaign
+
+The built-in accommodation campaign supplies provider-specific accommodation queries. Pass towns through `--locations` so each destination gets its own result allowance instead of relying on one region-wide query:
+
+```powershell
+docker compose run --rm scout `
+  --campaign accommodation `
+  --provider osm `
+  --locations Pula Rovinj Porec Umag Medulin Novigrad Vrsar Fazana Labin `
+  --countries Croatia `
+  --lead-preset no_website_phone `
+  --output-format csv,xlsx
+```
+
+OSM mode uses one broad structured accommodation query per location with a 12 km radius by default.
+
+For the most detailed accommodation search available without Google Places, use a town-by-town OSM campaign. This command raises the per-town result allowance, widens each town search to 15 km, tolerates more temporary Overpass failures, retains every discovered record, and enriches records that expose a website:
+
+```powershell
+docker compose run --rm scout `
+  --campaign accommodation `
+  --provider osm `
+  --locations Pula Rovinj Porec Umag Medulin Novigrad Vrsar Fazana Labin Rabac Pazin Buje Buzet Motovun Vodnjan Bale Tar-Vabriga Liznjan `
+  --countries Croatia `
+  --radius-km 15 `
+  --max-results 250 `
+  --request-delay 3 `
+  --osm-retries 4 `
+  --lead-preset all `
+  --secondary-scrape `
+  --output-format csv,json,xlsx
+```
+
+The locations overlap intentionally; stable OSM IDs are deduplicated in SQLite. Public Nominatim and Overpass instances can still rate-limit or time out, so let the run finish and rerun it later if the summary reports skipped searches. Use `--lead-preset no_website_phone` instead of `all` when you only want the immediate call list in the exports.
+
 ### 1. Start with a focused campaign
 
 Search a specific town and two or three service categories rather than a whole country at once:
@@ -342,6 +377,7 @@ Run the report again after a search or qualification update to refresh it.
 | Option | Description |
 |---|---|
 | `--provider osm\|google` | Search provider; default `osm` |
+| `--campaign accommodation` | Apply provider-specific accommodation search terms to any location(s) |
 | `--location TEXT` | One search area; default `Istria, Croatia` |
 | `--locations TEXT ...` | Multiple areas; overrides `--location` |
 | `--countries TEXT ...` | Countries combined with each location |
