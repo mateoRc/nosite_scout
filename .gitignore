@@ -6,3 +6,4 @@
 
 # Generated HTML dashboards
 reports/*.html
+exports/
