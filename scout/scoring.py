@@ -37,8 +37,8 @@ def probability_tier(probability: float) -> str:
     return "last_priority"
 
 
-def initialize_scoring(conn: sqlite3.Connection) -> None:
-    """Create score configuration and seed missing defaults."""
+def initialize_scoring(conn: sqlite3.Connection) -> bool:
+    """Create/seed score configuration; return whether default rules changed."""
     conn.execute(
         """CREATE TABLE IF NOT EXISTS category_prospect_scores (
             category_pattern TEXT PRIMARY KEY,
@@ -54,6 +54,7 @@ def initialize_scoring(conn: sqlite3.Connection) -> None:
             "ALTER TABLE category_prospect_scores ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0"
         )
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    changes_before = conn.total_changes
     conn.executemany(
         """INSERT INTO category_prospect_scores
            (category_pattern, probability, rationale, updated_at) VALUES (?, ?, ?, ?)
@@ -61,9 +62,13 @@ def initialize_scoring(conn: sqlite3.Connection) -> None:
              probability = excluded.probability,
              rationale = excluded.rationale,
              updated_at = excluded.updated_at
-           WHERE category_prospect_scores.is_custom = 0""",
+           WHERE category_prospect_scores.is_custom = 0 AND (
+             category_prospect_scores.probability != excluded.probability OR
+             category_prospect_scores.rationale != excluded.rationale
+           )""",
         [(pattern, probability, rationale, now) for pattern, probability, rationale in DEFAULT_CATEGORY_SCORES],
     )
+    return conn.total_changes > changes_before
 
 
 def category_score(conn: sqlite3.Connection, category: str | None) -> tuple[float, str]:
@@ -80,9 +85,15 @@ def category_score(conn: sqlite3.Connection, category: str | None) -> tuple[floa
     return probability, probability_tier(probability)
 
 
-def rescore_leads(conn: sqlite3.Connection, category_like: str = "%") -> int:
+def rescore_leads(
+    conn: sqlite3.Connection,
+    category_like: str = "%",
+    *,
+    only_unscored: bool = False,
+) -> int:
+    unscored = " AND prospect_probability IS NULL" if only_unscored else ""
     rows = conn.execute(
-        "SELECT place_id, category FROM leads WHERE COALESCE(category, '') LIKE ?",
+        f"SELECT place_id, category FROM leads WHERE COALESCE(category, '') LIKE ?{unscored}",
         (category_like,),
     ).fetchall()
     for place_id, category in rows:

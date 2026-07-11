@@ -1,0 +1,2 @@
+"""NoSite Scout application package."""
+

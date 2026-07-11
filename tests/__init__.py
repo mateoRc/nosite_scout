@@ -1,0 +1,2 @@
+"""NoSite Scout regression tests."""
+

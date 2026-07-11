@@ -1,7 +1,7 @@
 import argparse
 import unittest
 
-from accommodation_search import (
+from scout.campaigns import (
     GOOGLE_ACCOMMODATION_KEYWORDS,
     get_campaign,
 )

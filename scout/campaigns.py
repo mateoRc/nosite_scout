@@ -1,4 +1,4 @@
-"""Focused accommodation campaign definitions for NoSite Scout."""
+"""Provider-aware campaign definitions for NoSite Scout."""
 
 from __future__ import annotations
 

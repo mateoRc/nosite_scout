@@ -309,7 +309,7 @@ nosite_scout_YYYYMMDD_HHMMSS.xlsx
 nosite_scout_YYYYMMDD_HHMMSS.xml
 ```
 
-Rows are sorted by no website, phone availability, likely-small-business flag, and descending review count.
+Rows are sorted by prospect probability first, followed by website/phone qualification, the likely-small-business flag, and descending review count.
 
 ## Lead qualification workflow
 
@@ -384,6 +384,12 @@ Generate a self-contained HTML dashboard directly from the accumulated SQLite da
 python sqlite_report.py
 ```
 
+The report implementation lives in `reporting/`; the equivalent canonical module command is:
+
+```powershell
+python -m reporting.sqlite_report
+```
+
 Open `reports/lead_dashboard.html` in a browser. It shows the total lead funnel, top categories, top cities, qualification statuses, data sources, and a best-to-worst category prospect table. Click a category to open its read-only lead list, with 10, 15, or 20 rows per page. No additional Python packages or internet connection are required.
 
 For a campaign-specific database or output file:
@@ -437,6 +443,41 @@ Show the live CLI help after building:
 
 ```powershell
 docker compose run --rm scout --help
+```
+
+## Architecture
+
+`nosite_scout.py` is intentionally a small executable and backward-compatible import facade. Application code lives in focused modules under `scout/`:
+
+| Module | Responsibility |
+|---|---|
+| `scout/app.py` | Explicit discovery and export orchestration |
+| `scout/cli.py` | Argument parsing, validation, campaigns, and search-target expansion |
+| `scout/constants.py` | Canonical lead schema and shared configuration constants |
+| `scout/domain.py` | Pure normalization and business rules |
+| `scout/providers.py` | OSM/Overpass, Nominatim, and optional Google provider clients |
+| `scout/enrichment.py` | Optional website contact enrichment |
+| `scout/lead_factory.py` | Provider payload to canonical lead translation |
+| `scout/storage.py` | SQLite schema, migrations, upserts, workflow preservation, and queries |
+| `scout/exporting.py` | CSV, JSON, XLSX, and XML writers |
+| `scout/scoring.py` | Configurable category probability rules |
+| `scout/campaigns.py` | Accommodation and future campaign configuration |
+| `scout/workflow.py` | Workflow updates and CSV/XLSX imports |
+| `reporting/sqlite_report.py` | Self-contained interactive HTML dashboard generator |
+| `tests/` | Unit and regression tests grouped outside application code |
+
+Dependencies point inward: orchestration depends on the focused modules, while domain helpers do not depend on the CLI, database, or exports. Root Python files are deliberately tiny command entrypoints: `nosite_scout.py`, `lead_workflow.py`, and `sqlite_report.py`. Their implementations live in `scout/` and `reporting/`. Add new provider-specific calls in `scout/providers.py`, translate their payloads in `scout/lead_factory.py`, and keep persistence/export code provider-neutral.
+
+Run the regression suite after changes:
+
+```powershell
+python -m unittest -v
+```
+
+For explicit test discovery:
+
+```powershell
+python -m unittest discover -s tests -v
 ```
 
 ## Run without Docker

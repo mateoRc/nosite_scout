@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from prospect_scoring import category_score, initialize_scoring, rescore_leads, set_category_score
+from scout.scoring import category_score, initialize_scoring, rescore_leads, set_category_score
 
 
 class ProspectScoringTests(unittest.TestCase):
@@ -41,6 +41,12 @@ class ProspectScoringTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(probability, 1.2)
         self.assertEqual(tier, "last_priority")
+
+    def test_custom_rule_survives_default_initialization(self):
+        set_category_score(self.conn, "amenity:cafe", 1.7, "Observed result")
+        initialize_scoring(self.conn)
+        probability, _ = category_score(self.conn, "amenity:cafe")
+        self.assertEqual(probability, 1.7)
 
 
 if __name__ == "__main__":
